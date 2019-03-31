@@ -1,0 +1,284 @@
+---
+title: "Data 624, Project 1, Group 1: Exploration and forecasting of select series"
+author: "Heather Geiger"
+output: 
+ html_document:
+  code_folding: hide
+  smart: false
+---
+
+# Introduction
+
+From the assignment instructions:
+
+"Your data is a de-identified Excel spreadsheet.  Your assignment is to perform the appropriate analysis to forecast several series for 140 periods.  You will have 1622 periods for your analysis."
+
+I saved the Excel spreadsheet in a CSV file, and will be using this for all analysis.
+
+We also divided the work so that each group member would analyze three series. My assigned series are S02, S03, and S04. Full forecast list:
+
+* S02 – Forecast  Var02, Var03
+* S03 – Forecast  Var05, Var07
+* S04 – Forecast  Var01, Var02
+
+# Libraries
+
+Load in relevant libraries, including tidyverse and the forecasting library fpp2.
+
+Also lubridate for easier handling of dates.
+
+```{r, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(fpp2)
+library(lubridate)
+```
+
+# Data exploration
+
+## Read in and format data.
+
+Read in the data from the CSV file.
+
+```{r}
+data <- read.csv("data624_project1_excel_sheet_as_csv.csv",
+	header=TRUE,stringsAsFactors=FALSE)
+```
+
+Convert SeriesInd from Excel date number format to regular R dates.
+
+```{r}
+data$SeriesInd <- as.Date(data$SeriesInd,origin = "1899-12-30")
+```
+
+Separate the lines with actual data (1622 x 6 series = 9732) from the lines that are empty, but just give the dates over which we should forecast.
+
+```{r}
+dates_to_forecast <- unique(data$SeriesInd[9733:nrow(data)])
+
+data <- data[1:9732,]
+```
+
+## Check which dates included in SeriesInd and dates to be forecast.
+
+First, let's get a general overview by seeing how many of each day of the week included.
+
+```{r}
+table(weekdays(unique(data$SeriesInd)))
+```
+
+Looks like Wednesdays and Thursdays are not included at all. What about other dates missing from SeriesInd?
+
+```{r}
+data_range <- as.Date(seq(from=min(data$SeriesInd),to=max(data$SeriesInd),by="days"),origin="1970-01-01")
+
+missing_dates <- as.Date(setdiff(data_range,unique(data$SeriesInd)),origin="1970-01-01")
+
+missing_dates <- missing_dates[weekdays(missing_dates) %in% c("Monday","Tuesday","Friday","Saturday","Sunday")]
+
+missing_dates <- missing_dates[order(lubridate::month(missing_dates),day(missing_dates))]
+
+data.frame(Day = weekdays(missing_dates),
+	Date = missing_dates)
+```
+
+We get the following list of holidays.
+
+* First Friday of January
+* One time holiday in 2014 on Friday 02/28/14 and Saturday 03/01/14.
+* Last Monday in March
+* Late April, exact date varies (has been April 24 to 26 so far)
+* Early May, exact date varies (has been May 2 or 3 so far)
+* One Friday a month (toward the middle or end of the month) every year in May, June, and September
+* One Tuesday a year from late July to late August
+* Early November, exact date varies (has been November 1 to 4 so far)
+
+Now, what range of dates are we being asked to forecast? And does this include any holidays?
+
+```{r, echo=FALSE}
+print("Date range to forecast, and weekdays of forecast dates:")
+```
+
+```{r}
+range(dates_to_forecast)
+table(weekdays(dates_to_forecast))
+```
+
+```{r, echo=FALSE}
+print("Dates missing from to be forecast:")
+```
+
+```{r}
+forecast_range <- as.Date(seq(from=min(dates_to_forecast),to=max(dates_to_forecast),by="days"),origin="1970-01-01")
+
+missing_dates <- as.Date(setdiff(forecast_range,dates_to_forecast),origin="1970-01-01")
+
+missing_dates <- missing_dates[weekdays(missing_dates) %in% c("Monday","Tuesday","Friday","Saturday","Sunday")]
+
+missing_dates <- missing_dates[order(lubridate::month(missing_dates),day(missing_dates))]
+
+data.frame(Day = weekdays(missing_dates),
+        Date = missing_dates)
+```
+
+Looks like we are not being asked to forecast for Wednesdays or Thursdays, nor on any holidays. So that's good.
+
+## Check for missing values.
+
+In addition to dates missing from SeriesInd, there may be data missing for only certain series. Let's check.
+
+```{r}
+data_gathered <- gather(data,
+	key="Variable",
+	value="Value",
+	-SeriesInd,-group)
+data_gathered <- data.frame(data_gathered,
+	Group.plus.var = paste0(data_gathered$group,"-",data_gathered$Variable),
+	stringsAsFactors=FALSE)
+data_gathered <- data_gathered[order(data_gathered$SeriesInd,data_gathered$group),]
+
+dates_with_NA <- as.Date(c(40697,41821,42897,42898,42997,43000),origin="1899-12-30")
+
+data_gathered[which(is.na(data_gathered$Value) == TRUE & (data_gathered$SeriesInd == dates_with_NA[1] | data_gathered$SeriesInd == dates_with_NA[2])),]
+data_gathered[which(is.na(data_gathered$Value) == TRUE & (data_gathered$SeriesInd == dates_with_NA[3] | data_gathered$SeriesInd == dates_with_NA[4])),]
+data_gathered[which(is.na(data_gathered$Value) == TRUE & (data_gathered$SeriesInd == dates_with_NA[5] | data_gathered$SeriesInd == dates_with_NA[6])),]
+```
+
+```{r, echo=FALSE}
+print("Day of week of 2017-06-11:")
+```
+
+```{r}
+weekdays(as.Date("2017-06-11",origin="1970-01-01"))
+```
+
+```{r, echo=FALSE}
+print("Day of week of 2017-09-19 and 2017-09-22:")
+```
+
+```{r}
+weekdays(as.Date(c("2017-09-19","2017-09-22"),origin="1970-01-01"))
+``` 
+
+We find the following missing values.
+
+* Date 2011-06-03, all five variables of S06. Simply remove or use the nearby timepoints within the same series and variable to fill in.
+* Date 2014-07-01, all five variables of S05. Simply remove or use the nearby timepoints within the same series and variable to fill in.
+* Dates 2017-06-11 (Sunday) and 2017-06-12 (Monday), all six series and all four correlated variables (1/3/5/7). Simply remove or use the nearby timepoints within the same series and variable to fill in.
+* Dates 2017-09-19 and 2017-09-22, all six series and 3/4 correlated variables (3/5/7). Can either use nearby timepoints or the correlated variable without missing values (Var01).
+
+Relevant to this part of the project are the last four dates only.
+
+Let's move on to do some more data exploration. That will help us decide how we should fill in missing dates and NAs.
+
+# Data exploration
+
+Start with some simple line plots across the full range of time.
+
+Remember, we are interested in the following:
+
+* S02 – Forecast  Var02, Var03
+* S03 – Forecast  Var05, Var07
+* S04 – Forecast  Var01, Var02
+
+```{r}
+data_gathered_full <- data_gathered
+data_gathered <- data_gathered[data_gathered$Group.plus.var %in% c("S02-Var02","S02-Var03","S03-Var05","S03-Var07","S04-Var01","S04-Var02"),]
+```
+
+```{r,fig.height=6,fig.width=10}
+ggplot(data_gathered,
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var,ncol=3,nrow=2,scales="free") +
+xlab("Time")
+```
+
+Remove a few outliers and replot.
+
+```{r}
+outliers <- which(data_gathered$Group.plus.var == "S02-Var02" & data_gathered$Value > 3e8)
+outliers <- c(outliers, which(data_gathered$Group.plus.var == "S02-Var03" & data_gathered$Value > 20))
+outliers <- c(outliers,which(data_gathered$Group.plus.var == "S04-Var02" & data_gathered$Value > 1e8))
+
+data_gathered_minus_outliers <- data_gathered[setdiff(1:nrow(data_gathered),outliers),]
+```
+
+```{r,fig.height=6,fig.width=10}
+ggplot(data_gathered_minus_outliers,
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var,ncol=3,nrow=2,scales="free") +
+xlab("Time") +
+ggtitle("Minus outliers")
+```
+
+Some notes:
+
+* Var02 (in both groups) is definitely noisier than the other variables.
+* S04-Var02 looks like a stationary series. S02-Var02 may or may not be, hard to tell. Kind of looks like it could be, though also sort of looks like could have a bit of a decreasing trend.
+* The other variables seems like they have some kind of pattern to them. Although it looks like it could be cyclic rather than a trend, in which case modeling as a stationary series could still work.
+* The non-Var02 variables may also have a seasonal component, but it is a bit hard to tell from this graph alone.
+
+One quick thing to check - is there any day of the week pattern? Let's plot to check.
+
+```{r,fig.width=6,fig.height=6}
+data_gathered_minus_outliers <- data.frame(data_gathered_minus_outliers,
+	Day = weekdays(data_gathered_minus_outliers$SeriesInd),
+	stringsAsFactors=FALSE)
+
+mycol <- c("#000000", "#009E73", "#e79f00", "#9ad0f3", "#0072B2", "#D55E00", "#CC79A7", "#F0E442") #Colorblind-friendly vector
+mycol <- mycol[c(2:8,1)]
+
+ggplot(data_gathered_minus_outliers[data_gathered_minus_outliers$Variable != "Var02",],
+aes(SeriesInd,Value,colour=Day)) +
+geom_line() +
+facet_wrap(~Group.plus.var,ncol=2,nrow=2,scales="free") +
+xlab("Time") +
+ggtitle("Minus outliers") +
+scale_colour_manual(values=mycol) +
+theme(legend.position=c(0.65,0.3))
+```
+
+```{r,fig.height=6,fig.width=10}
+ggplot(data_gathered_minus_outliers[data_gathered_minus_outliers$Group.plus.var == "S02-Var02",],
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Day,ncol=3,nrow=2) +
+xlab("Time") +
+ggtitle("S02-Var02, minus outliers")
+```
+
+```{r,fig.height=6,fig.width=10}
+ggplot(data_gathered_minus_outliers[data_gathered_minus_outliers$Group.plus.var == "S02-Var02",],
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Day,ncol=3,nrow=2) +
+xlab("Time") +
+ggtitle("S02-Var02, minus outliers, reduce ylim") +
+coord_cartesian(ylim=c(0,2e8))
+```
+
+```{r, fig.height=6,fig.width=10}
+ggplot(data_gathered_minus_outliers[data_gathered_minus_outliers$Group.plus.var == "S04-Var02",],
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Day,ncol=3,nrow=2) +
+xlab("Time") +
+ggtitle("S04-Var02, minus outliers") 
+```
+
+```{r, fig.height=6,fig.width=10}
+ggplot(data_gathered_minus_outliers[data_gathered_minus_outliers$Group.plus.var == "S04-Var02",],
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Day,ncol=3,nrow=2) +
+xlab("Time") +
+ggtitle("S04-Var02, minus outliers, reduce ylim") +
+coord_cartesian(ylim=c(0,5e7))
+```
+
+There does not seem to be a major day of the week component in any of the variables we are working with.
+
+
