@@ -1,0 +1,614 @@
+---
+title: "Data 624, Project 1, Group 1: Exploration and forecasting of select series"
+author: "Heather Geiger"
+output: 
+ html_document:
+  code_folding: hide
+  smart: false
+---
+
+# Introduction
+
+From the assignment instructions:
+
+"Your data is a de-identified Excel spreadsheet.  Your assignment is to perform the appropriate analysis to forecast several series for 140 periods.  You will have 1622 periods for your analysis."
+
+I saved the Excel spreadsheet in a CSV file, and will be using this for all analysis.
+
+We also divided the work so that each group member would analyze three series. My assigned series are S02, S03, and S04. Full forecast list:
+
+* S02 – Forecast  Var02, Var03
+* S03 – Forecast  Var05, Var07
+* S04 – Forecast  Var01, Var02
+
+# Libraries
+
+Load in relevant libraries, including tidyverse and the forecasting library fpp2.
+
+Also lubridate for easier handling of dates.
+
+```{r, message=FALSE, warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(fpp2)
+library(lubridate)
+```
+
+# Data exploration
+
+## Read in and format data.
+
+Read in the data from the CSV file.
+
+```{r}
+data <- read.csv("data624_project1_excel_sheet_as_csv.csv",
+	header=TRUE,stringsAsFactors=FALSE)
+```
+
+Convert SeriesInd from Excel date number format to regular R dates.
+
+```{r}
+data$SeriesInd <- as.Date(data$SeriesInd,origin = "1899-12-30")
+```
+
+Separate the lines with actual data (1622 x 6 series = 9732) from the lines that are empty, but just give the dates over which we should forecast.
+
+```{r}
+dates_to_forecast <- unique(data$SeriesInd[9733:nrow(data)])
+
+data <- data[1:9732,]
+```
+
+## Check which dates included in SeriesInd and dates to be forecast.
+
+First, let's get a general overview by seeing how many of each day of the week included.
+
+```{r}
+table(weekdays(unique(data$SeriesInd)))
+```
+
+Looks like Wednesdays and Thursdays are not included at all. What about other dates missing from SeriesInd?
+
+```{r}
+data_range <- as.Date(seq(from=min(data$SeriesInd),to=max(data$SeriesInd),by="days"),origin="1970-01-01")
+
+missing_dates <- as.Date(setdiff(data_range,unique(data$SeriesInd)),origin="1970-01-01")
+
+missing_dates <- missing_dates[weekdays(missing_dates) %in% c("Monday","Tuesday","Friday","Saturday","Sunday")]
+
+missing_dates <- missing_dates[order(lubridate::month(missing_dates),day(missing_dates))]
+
+data.frame(Day = weekdays(missing_dates),
+	Date = missing_dates)
+```
+
+We get the following list of holidays.
+
+* First Friday of January
+* One time holiday in 2014 on Friday 02/28/14 and Saturday 03/01/14.
+* Last Monday in March
+* Late April, exact date varies (has been April 24 to 26 so far)
+* Early May, exact date varies (has been May 2 or 3 so far)
+* One Friday a month (toward the middle or end of the month) every year in May, June, and September
+* One Tuesday a year from late July to late August
+* Early November, exact date varies (has been November 1 to 4 so far)
+
+Now, what range of dates are we being asked to forecast? And does this include any holidays?
+
+```{r, echo=FALSE}
+print("Date range to forecast, and weekdays of forecast dates:")
+```
+
+```{r}
+range(dates_to_forecast)
+table(weekdays(dates_to_forecast))
+```
+
+```{r, echo=FALSE}
+print("Dates missing from to be forecast:")
+```
+
+```{r}
+forecast_range <- as.Date(seq(from=min(dates_to_forecast),to=max(dates_to_forecast),by="days"),origin="1970-01-01")
+
+missing_dates <- as.Date(setdiff(forecast_range,dates_to_forecast),origin="1970-01-01")
+
+missing_dates <- missing_dates[weekdays(missing_dates) %in% c("Monday","Tuesday","Friday","Saturday","Sunday")]
+
+missing_dates <- missing_dates[order(lubridate::month(missing_dates),day(missing_dates))]
+
+data.frame(Day = weekdays(missing_dates),
+        Date = missing_dates)
+```
+
+Looks like we are not being asked to forecast for Wednesdays or Thursdays, nor on any holidays. So that's good.
+
+## Convert to long format and select relevant series.
+
+Let's convert from wide to long format, and select only our series of interest.
+
+```{r}
+data_gathered <- gather(data,
+        key="Variable",
+        value="Value",
+        -SeriesInd,-group)
+data_gathered <- data.frame(data_gathered,
+        Group.plus.var = paste0(data_gathered$group,"-",data_gathered$Variable),
+        stringsAsFactors=FALSE)
+data_gathered <- data_gathered[data_gathered$Group.plus.var %in% c("S02-Var02","S02-Var03","S03-Var05","S03-Var07","S04-Var01","S04-Var02"),]
+```
+
+## Check for missing values where date is present in SeriesInd.
+
+Let's print all rows with NA.
+
+```{r}
+rows_with_NA <- data_gathered[which(is.na(data_gathered$Value) == TRUE),]
+rows_with_NA[order(rows_with_NA$SeriesInd,rows_with_NA$group,rows_with_NA$Variable),]
+```
+
+We find that 2017-06-11 and 2017-06-12 are missing for all non-Var02 variables.
+
+2017-09-19 and 2017-09-22 are missing for most non-Var02 variables except for S04-Var01.
+
+## Explore distribution of data in general and over time.
+
+Start by making some simple line plots from the data.
+
+```{r,fig.height=6,fig.width=10}
+ggplot(data_gathered,
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var,ncol=3,nrow=2,scales="free") +
+xlab("Time")
+```
+
+Looks like we may want to try plotting both Var02 variables in log10.
+
+Also, let's see what S03-Var05 and S03-Var07 look like on the same plots.
+
+Finally, plot S02-Var03 with a truncated y-axis.
+
+```{r,fig.height=6,fig.width=8}
+data_gathered_Var02 <- data_gathered[data_gathered$Variable == "Var02",]
+
+ggplot(data_gathered_Var02,
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var,ncol=3,nrow=2) +
+xlab("Time") +
+scale_y_log10()
+```
+
+```{r,fig.height=6,fig.width=6}
+data_gathered_S03 <- data_gathered[data_gathered$group == "S03",]
+
+ggplot(data_gathered_S03,
+aes(SeriesInd,Value,colour=Variable)) +
+geom_line() +
+xlab("Time") +
+theme(legend.position="none") +
+ggtitle("S03, Var05 (red) and Var07 (blue)")
+```
+
+```{r,fig.height=6,fig.width=6}
+ggplot(data_gathered[data_gathered$Group.plus.var == "S02-Var03",],
+aes(SeriesInd,Value)) +
+geom_line() +
+xlab("Time") +
+ggtitle("S02-Var03, truncated y-axis") +
+coord_cartesian(ylim = c(min(data_gathered[data_gathered$Group.plus.var == "S02-Var03","Value"],na.rm=TRUE),18))
+```
+
+From these plots, we find the following notes:
+
+* Both Var02 variables appear much more noisy than the other variables.
+* Converting Var02 to log10 seems to be the right choice, making the outliers less extreme.
+* S02-Var02 seems like it may have a decreasing trend.
+* Both S03 variables appear very similar. If this were an actual business report, I would suggest only using one or combining somehow, as they are mostly redundant.
+* S02-Var03 has one strong outlier that should definitely be adjusted.
+* All of the non-Var02 variables look like they may have trend, seasonality, and/or a cyclic pattern. Hard to tell from just this graph alone.
+
+Now, let's make a histogram of each variable. Use log10 for Var02.
+
+```{r,fig.height=6,fig.width=10}
+variables <- unique(data_gathered$Group.plus.var)[order(unique(data_gathered$Group.plus.var))]
+
+par(mfrow=c(2,3))
+
+for(var in variables)
+{
+	if(var == "S02-Var02" | var == "S04-Var02"){
+		values = log10(data_gathered$Value[data_gathered$Group.plus.var == var])
+		title = paste0(var," log10")
+		}
+	if(var != "S02-Var02" & var != "S04-Var02"){
+		values = data_gathered$Value[data_gathered$Group.plus.var == var]
+		title = var
+		}
+	hist(values,
+	xlab="Values",
+	ylab="Number of dates",
+	labels=TRUE,
+	main=title)
+}
+```
+
+Also make a histogram minus the outlier for S02-Var03.
+
+```{r,fig.height=6,fig.width=6}
+var = "S02-Var03"
+
+values = data_gathered$Value[data_gathered$Group.plus.var == var]
+values = values[values < 20]
+
+title = paste0(var," minus outlier")
+
+hist(values,
+xlab="Values",
+ylab="Number of dates",
+labels=TRUE,
+main=title)
+```
+
+Notes:
+
+* Both Var02 variables actually look relatively close to normal once you convert to log10.
+* Both S03 variables and S02-Var03 minus outlier actually look more like a uniform distribution than normal, other than at the extremes. But at least there is no major skew.
+* S04-Var01 has some right skew, although it is not super extreme.
+
+## Explore distribution of differenced data in general and over time.
+
+Let's make the same plots, but taking the difference of each value over the previous value.
+
+For Var02, take the difference of the log10 values.
+
+```{r}
+var = variables[1]
+
+data_this_var <- data_gathered[which(is.na(data_gathered$Value) == FALSE & data_gathered$Group.plus.var == var),]
+
+differenced_data_this_var <- data.frame(SeriesInd = data_this_var$SeriesInd[2:nrow(data_this_var)],
+	Difference = log10(data_this_var$Value[2:nrow(data_this_var)]) - log10(data_this_var$Value[1:(nrow(data_this_var) - 1)]),
+	stringsAsFactors=FALSE)
+```
+
+```{r}
+differenced_data_this_var <- data.frame(differenced_data_this_var,
+	Variable = var,
+	stringsAsFactors=FALSE)
+```
+
+```{r}
+differenced_data <- differenced_data_this_var
+```
+
+```{r}
+for(var in variables[2:length(variables)])
+{
+	data_this_var <- data_gathered[which(is.na(data_gathered$Value) == FALSE & data_gathered$Group.plus.var == var),]
+	if(var != "S04-Var02")
+	{
+		differenced_data_this_var <- data.frame(SeriesInd = data_this_var$SeriesInd[2:nrow(data_this_var)],
+			Difference = data_this_var$Value[2:nrow(data_this_var)] - data_this_var$Value[1:(nrow(data_this_var) - 1)],
+			stringsAsFactors=FALSE)
+	}
+	if(var == "S04-Var02")
+	{
+		differenced_data_this_var <- data.frame(SeriesInd = data_this_var$SeriesInd[2:nrow(data_this_var)],
+			Difference = log10(data_this_var$Value[2:nrow(data_this_var)]) - log10(data_this_var$Value[1:(nrow(data_this_var) - 1)]),
+			stringsAsFactors=FALSE)
+	}
+	differenced_data_this_var <- data.frame(differenced_data_this_var,
+		Variable = var,
+		stringsAsFactors=FALSE)
+	differenced_data <- rbind(differenced_data,differenced_data_this_var)
+}
+```
+
+```{r,fig.height=6,fig.width=10}
+par(mfrow=c(2,3))
+
+for(var in variables)
+{
+	if(var == "S02-Var02" | var == "S04-Var02"){
+        title = paste0(var," differenced log10 data")
+	}
+	if(var != "S02-Var02" & var != "S04-Var02"){
+		title = paste0(var," differenced data")
+	}
+	values = differenced_data$Difference[differenced_data$Variable == var]
+	hist(values,
+		xlab="Values",
+		ylab="Number of dates",
+        labels=TRUE,
+        main=title)
+}
+```
+
+```{r, fig.height=6,fig.width=8}
+par(mfrow=c(2,2))
+
+for(var in c("S02-Var03","S03-Var05","S04-Var01"))
+{
+	values = differenced_data$Difference[differenced_data$Variable == var] 
+	if(var == "S02-Var03"){outlier = 1}
+	if(var == "S03-Var05"){outlier = 5}
+	if(var == "S04-Var01"){outlier = 1}
+
+	values = values[abs(values) < outlier]
+	
+	title = paste0(var,"\nDifferenced, minus outliers")
+
+	hist(values,
+		xlab="Values",
+		ylab="Number of dates", 
+		labels=TRUE,
+		main=title)
+}
+```
+
+Let's plot line plots.
+
+```{r,fig.height=6,fig.width=10}
+outliers <- which(differenced_data$Variable == "S02-Var03" & abs(differenced_data$Difference) > 10)
+
+ggplot(differenced_data[setdiff(1:nrow(differenced_data),outliers),],
+aes(SeriesInd,Difference)) +
+geom_line() +
+facet_wrap(~Variable,ncol=3,nrow=2,scales="free") +
+ylab("Differences (after log10 if Var02)") +
+ggtitle("Minus S02-Var03 outlier")
+```
+
+Data looks a lot closer to white noise than before.
+
+## Check for day of the week effects.
+
+One "seasonal" pattern that would be hard to see in the overall plot would be day of the week effects.
+
+Let's make sure we do not see any.
+
+```{r,fig.width=10,fig.height=15}
+data_gathered_with_day <- data.frame(data_gathered,
+	Day = weekdays(data_gathered$SeriesInd),
+	stringsAsFactors=FALSE)
+
+data_gathered_with_day$Group.plus.var <- factor(data_gathered_with_day$Group.plus.var,
+	levels=variables)
+
+data_gathered_with_day$Day <- factor(data_gathered_with_day$Day,
+	levels=c("Friday","Saturday","Sunday","Monday","Tuesday"))
+
+ggplot(data_gathered_with_day,
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var + Day,ncol=5,nrow=6,scales="free")
+```
+
+```{r,fig.width=10,fig.height=6}
+ggplot(data_gathered_with_day[as.vector(data_gathered_with_day$Group.plus.var) %in% c("S02-Var02","S04-Var02"),],
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var + Day,ncol=5,nrow=2) +
+scale_y_log10()
+```
+
+Looks like we do not see any day of the week effects.
+
+# Data cleaning and transformation
+
+## Convert Var02 to log10.
+
+Convert both Var02 variables to log10.
+
+```{r}
+data_gathered$Value[data_gathered$Group.plus.var %in% c("S02-Var02","S04-Var02")] <- log10(data_gathered$Value[data_gathered$Group.plus.var %in% c("S02-Var02","S04-Var02")])
+```
+
+## Outlier removal
+
+### Adjust S02-Var03 outlier to fit in normal distribution.
+
+For the one obvious S02-Var03 outlier, get the value that would come from a z-score equal to 1/n, where n is the number of non-NA values we currently have.
+
+Use this to fill in and make the outlier less extreme.
+
+```{r}
+S02_Var03 <- data_gathered$Value[data_gathered$Group.plus.var == "S02-Var03"]
+S02_Var03_max <- max(S02_Var03,na.rm=TRUE)
+S02_Var03_minus_max <- S02_Var03[which(is.na(S02_Var03) == FALSE & S02_Var03 < S02_Var03_max)]
+
+non_NA_values <- length(S02_Var03_minus_max) + 1
+max_zscore <- -1*qnorm(1/non_NA_values)
+new_value <- mean(S02_Var03_minus_max) + max_zscore*sd(S02_Var03_minus_max)
+
+data_gathered$Value[data_gathered$Group.plus.var == "S02-Var03" & data_gathered$Value == S02_Var03_max] <- new_value
+```
+
+### Check if need to remove any other outliers.
+
+Let's make a histogram of centered values for each variable now.
+
+```{r,fig.height=6,fig.width=10}
+par(mfrow=c(2,3))
+
+for(var in variables)
+{
+	non_NA <- data_gathered$Value[data_gathered$Group.plus.var == var]
+	non_NA <- non_NA[which(is.na(non_NA) == FALSE)]
+	non_NA <- (non_NA - mean(non_NA))/sd(non_NA)
+	hist(non_NA,
+		xlab="Z-score",
+		ylab="Number of dates",
+		main=var,
+		labels=TRUE)
+}
+```
+
+Let's also adjust the value with z-score > 5 in S04-Var02, then plot before and after.
+
+```{r}
+S04_Var02_pre_transform <- data_gathered[data_gathered$Group.plus.var == "S04-Var02",]
+
+S04_Var02_pre_transform$Group.plus.var <- paste0(as.vector(S04_Var02_pre_transform$Group.plus.var),"-before")
+```
+
+```{r}
+S04_Var02 <- data_gathered$Value[data_gathered$Group.plus.var == "S04-Var02"]
+S04_Var02_max <- max(S04_Var02,na.rm=TRUE)
+S04_Var02_minus_max <- S04_Var02[which(is.na(S04_Var02) == FALSE & S04_Var02 < S04_Var02_max)]
+
+data_gathered$Value[data_gathered$Group.plus.var == "S04-Var02" & data_gathered$Value == S04_Var02_max] <- max(S04_Var02_minus_max)
+```
+
+```{r}
+S04_Var02_post_transform <- data_gathered[data_gathered$Group.plus.var == "S04-Var02",]
+
+S04_Var02_post_transform$Group.plus.var <- paste0(as.vector(S04_Var02_post_transform$Group.plus.var),"-post")
+```
+
+```{r}
+S04_Var02 <- rbind(S04_Var02_pre_transform,S04_Var02_post_transform)
+```
+
+```{r}
+ggplot(S04_Var02,
+aes(SeriesInd,Value)) +
+geom_line() +
+facet_wrap(~Group.plus.var) +
+ggtitle("Before and after outlier adjust")
+```
+
+Looks good!
+
+### Filling in NAs
+
+Let's use a very simple strategy to fill in NAs for non-consecutive missing dates.
+
+Average the nearest non-missing day before and day after.
+
+```{r}
+data_range <- as.Date(seq(from=min(data$SeriesInd),to=max(data$SeriesInd),by="days"),origin="1970-01-01")
+
+missing_dates <- as.Date(setdiff(data_range,unique(data$SeriesInd)),origin="1970-01-01")
+
+missing_dates <- missing_dates[weekdays(missing_dates) %in% c("Monday","Tuesday","Friday","Saturday","Sunday")]
+
+missing_dates <- missing_dates[order(lubridate::month(missing_dates),day(missing_dates))]
+```
+
+```{r}
+missing_dates_non_consecutive <- setdiff(missing_dates,
+	as.Date(c("2014-02-28","2014-03-01"),origin="1970-01-01"))
+
+dates_in_data <- unique(data$SeriesInd)
+```
+
+```{r}
+for(var in variables)
+{
+	data_this_var <- data_gathered[data_gathered$Group.plus.var == var,]
+
+	to_fill_in <- c()
+	
+	for(date in as.Date(missing_dates_non_consecutive,origin="1970-01-01"))
+	{
+		this_nearest_before <- dates_in_data[dates_in_data < date]
+		this_nearest_after <- dates_in_data[dates_in_data > date]
+		to_fill_in <- c(to_fill_in,
+			mean(c(data_this_var[data_this_var$SeriesInd == this_nearest_before[length(this_nearest_before)],"Value"],
+			data_this_var[data_this_var$SeriesInd == this_nearest_after[1],"Value"])))
+	}
+	
+	data_gathered <- rbind(data_gathered,
+		data.frame(SeriesInd = as.Date(missing_dates_non_consecutive,origin="1970-01-01"),
+			group = unique(data_this_var$group),
+			Variable = unique(data_this_var$Variable),
+			Value = to_fill_in,
+			Group.plus.var = var,
+			stringsAsFactors=FALSE))
+}
+```
+
+```{r}
+data_gathered <- data_gathered[order(data_gathered$SeriesInd),]
+
+dates_in_data <- unique(data_gathered$SeriesInd)
+```
+
+For consecutive missing dates, use a slightly modified strategy (weighted average).
+
+1. First missing day - 2/3 nearest day before + 1/3 nearest day after
+2. Second missing day - 1/3 nearest day before + 2/3 nearest day after
+
+```{r}
+data_gathered <- rbind(data_gathered,
+	data.frame(SeriesInd = as.Date(rep(c("2014-02-28","2014-03-01"),times=6),origin="1970-01-01"),
+		group = rep(unlist(lapply(strsplit(variables,"-"),"[[",1)),each=2),
+		Variable = rep(unlist(lapply(strsplit(variables,"-"),"[[",2)),each=2),
+		Value = NA,
+		Group.plus.var = rep(variables,each=2),
+		stringsAsFactors=FALSE))
+```
+
+```{r}
+data_gathered <- data_gathered[order(data_gathered$SeriesInd),]
+```
+
+```{r}
+for(var in variables)
+{
+	data_this_var <- data_gathered[data_gathered$Group.plus.var == var,]
+
+	present_dates <- data_this_var$SeriesInd[which(is.na(data_this_var$Value) == FALSE)]
+	absent_dates <- data_this_var$SeriesInd[which(is.na(data_this_var$Value) == TRUE)]
+
+	to_fill_in <- rep(NA,times=length(absent_dates))
+
+	for(i in 1:length(absent_dates))
+	{
+		date = as.Date(absent_dates[i],origin="1970-01-01")
+
+		this_nearest_before <- present_dates[present_dates < date]
+		this_nearest_after <- present_dates[present_dates > date]
+
+		this_nearest_before <- this_nearest_before[length(this_nearest_before)]
+		this_nearest_after <- this_nearest_after[1]
+
+		if((i %% 2) == 1){to_fill_in[i] <- mean(c(this_nearest_before,this_nearest_before,this_nearest_after))}
+		if((i %% 2) == 0){to_fill_in[i] <- mean(c(this_nearest_before,this_nearest_after,this_nearest_after))}
+	}
+
+	data_gathered <- rbind(data_gathered,
+		data.frame(SeriesInd = as.Date(absent_dates,origin="1970-01-01"),
+            group = unique(data_this_var$group),
+            Variable = unique(data_this_var$Variable),
+            Value = to_fill_in,
+            Group.plus.var = var,
+            stringsAsFactors=FALSE))
+}
+```	
+
+```{r}
+data_gathered <- data_gathered[which(is.na(data_gathered$Value) == FALSE),]
+
+data_gathered <- data_gathered[order(data_gathered$SeriesInd,data_gathered$Group.plus.var),]
+```
+
+```{r,echo=FALSE,eval=FALSE}
+new_dates <- unique(data_gathered$SeriesInd)
+
+table(weekdays(new_dates))
+
+all_dates <- as.Date(seq(from = min(data_gathered$SeriesInd),to = max(data_gathered$SeriesInd),by="days"),origin="1970-01-01")
+
+all_dates <- all_dates[weekdays(all_dates) != "Wednesday" & weekdays(all_dates) != "Thursday"]
+
+as.Date(setdiff(all_dates,new_dates),origin="1970-01-01")
+```
+
+### Filling in Wednesdays and Thursdays
+
+Now we just need to fill in Wednesdays and Thursdays.
