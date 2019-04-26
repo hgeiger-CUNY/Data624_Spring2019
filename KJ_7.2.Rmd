@@ -1,0 +1,175 @@
+---
+title: KJ 7.2
+author: Heather Geiger
+output:
+ html_document:
+  smart: false
+---
+
+# Libraries
+
+Load libraries.
+
+```{r,message=FALSE,warning=FALSE}
+library(mlbench)
+library(caret)
+library(earth)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+# Set up question data.
+
+Set seed.
+
+```{r}
+set.seed(200)
+```
+
+Set up training data.
+
+```{r}
+trainingData <- mlbench.friedman1(200, sd = 1)
+```
+
+Format training data.
+
+```{r}
+trainingData$x <- data.frame(trainingData$x)
+```
+
+Plot training data predictors vs. outcome.
+
+```{r}
+featurePlot(trainingData$x,trainingData$y)
+```
+
+Looks like the first five predictors have a better correlation with the outcome than the last five.
+
+Set up and format test data.
+
+```{r}
+testData <- mlbench.friedman1(5000, sd = 1)
+testData$x <- data.frame(testData$x)
+```
+
+# Instructions
+
+Tune several models on these data.
+
+Example of a model given was using the caret package train function with a KNN model, pre-process training data with centering and scaling, tuneLength = 10 (for KNN, this would mean trying 10 different values for k).
+
+Then, use the models based on the training data to predict on test data. 
+
+Which models appear to give the best performance? Does MARS select the informative predictors (those named X1–X5)?
+
+# Answer
+
+## Preliminary steps
+
+Before we start creating models, let's set our own seed, separate from the one used to create the input data.
+
+```{r}
+set.seed(1392)
+```
+
+Also, write a function to look at error and R-squared of a given model applied to the test data.
+
+```{r}
+error_and_Rsquared <- function(model){
+	predictions <- predict(model,newdata = testData$x)
+	return(postResample(pred = predictions, obs = testData$y))
+}
+```
+
+## Neural networks
+
+Let's try the neural networks method with model averaging.
+
+```{r avg-nnet-7.2,cache=TRUE,message=FALSE,warning=FALSE}
+nnetGrid <- expand.grid(.decay = c(0, 0.01, .1),
+                .size = c(1:10),
+                .bag = FALSE)
+
+averaging_nnet_model <- train(trainingData$x,trainingData$y,
+                            method="avNNet",
+                            tuneGrid = nnetGrid,
+                            trControl = trainControl(method = "cv", number = 10),
+                            preProc = c("center", "scale"),
+                            linout = TRUE,
+                            trace=FALSE,
+                            maxit = 500)
+```
+
+## Multivariate Adaptive Regression Splines (MARS)
+
+Use the earth command from the earth package.
+
+```{r MARS-model-7.2,message=FALSE,warning=FALSE,cache=TRUE}
+MARS_model <- earth(trainingData$x,trainingData$y)
+```
+
+Print model details.
+
+```{r}
+MARS_model
+
+summary(MARS_model)
+```
+
+"Does MARS select the informative predictors (those named X1–X5)?"
+
+For the most part, yes, but not entirely. The MARS model does include all five of the informative predictors (X1-X5) and excludes most of the last predictors that did not appear as correlated with outcome. However, it does also include one of the last predictors (X6).
+
+##  Support Vector Machine (SVM)
+
+I tried running SVM with a polynomial kernel here, but runtime was impractically long.
+
+However, I will try running with both a linear and radial basis function kernel.
+
+```{r SVM-linear-kernel-7.2,message=FALSE,warning=FALSE,cache=TRUE}
+SVM_linear_model <- train(trainingData$x,trainingData$y,
+						method="svmLinear",
+						trControl = trainControl(method = "cv", number = 10),
+						preProc = c("center", "scale"),
+						tuneLength = 14)
+```
+
+```{r SVM-RBF-kernel-7.2,message=FALSE,warning=FALSE,cache=TRUE}
+SVM_RBF_model <- train(trainingData$x,trainingData$y,
+					method="svmRadial",
+					trControl = trainControl(method = "cv", number = 10),
+					preProc = c("center", "scale"),
+					tuneLength = 14)
+```
+
+# K-Nearest Neighbors (KNN)
+
+Let's run KNN just as it was run in the question example.
+
+```{r knn-model-7.2,cache=TRUE}
+knn_model <- train(x = trainingData$x,
+                y = trainingData$y,
+                method = "knn",
+                preProc = c("center", "scale"),
+                tuneLength = 10)
+```
+
+# Comparing models
+
+Run function to get error and R-squared for each model.
+
+```{r}
+for(model in c("averaging_nnet_model","MARS_model","SVM_linear_model","SVM_RBF_model","knn_model"))
+{
+	print(model)
+	print(error_and_Rsquared(get(model)))
+}
+```
+
+Looks like the best model here in terms of both R-squared (aka variance explained) and RMSE/MAE (minimizing error) within the test data is MARS.
+
+After that, the neural network with model averaging and SVM with radial basis function both perform pretty similarly, falling slightly behind MARS but still doing pretty well.
+
+The KNN and SVM with linear kernel models perform the worst out of the five models tested. 

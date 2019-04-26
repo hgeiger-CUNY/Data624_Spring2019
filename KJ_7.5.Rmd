@@ -1,0 +1,111 @@
+---
+title: "KJ 7.5"
+author: "Heather Geiger"
+output:
+  html_document:
+    smart: no
+  pdf_document: default
+---
+
+# Libraries
+
+Load libraries.
+
+```{r,message=FALSE,warning=FALSE}
+library(AppliedPredictiveModeling)
+library(mlbench)
+library(caret)
+library(earth)
+library(impute)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+# Set up question data.
+
+A chemical manufacturing process for a pharmaceutical product was discussed previously.
+
+In this problem, the objective is to understand the relationship between biological measurements of the raw materials (predictors), measurements of the manufacturing process (predictors), and the response of product yield. 
+
+Biological predictors cannot be changed but can be used to assess the quality of the raw material before processing. On the other hand, manufacturing process predictors can be changed in the manufacturing process. Improving product yield by 1 % will boost revenue by approximately one hundred thousand dollars per batch.
+
+Load the data in R.
+
+```{r}
+data(ChemicalManufacturingProcess)
+```
+
+A small percentage of cells in the predictor set contain missing values. We are asked to use an imputation function to fill in these missing values.
+
+We find the following NAs in the data.
+
+* Row 1 - Has 11 variables where this row is the only NA for that variable: manufacturing processes 1,4,5,7,8,12,22,23,24,40,41 
+* Row 23 - Has 1 variable where this row is the only NA for that variable: manufacturing process 14
+* Rows 172,173,174,175,176 - Have NAs in manufacturing processes 25-31,33-36 (not 32!)
+* Rows 1,2,3,4,5,6,22,23,24 - Have NAs in manufacturing processes 3,10, and 11
+
+* Manufacturing process 6 - has NA in rows 1 and 90
+* Manufacturing process 2 - has NA in rows 1,134, and 139
+
+* Manufacturing process 3 - also has NA in rows 15-20
+* Manufacturing process 11 - also has NA in row 98
+
+We also find that one row (108) has a 0 for mps 25,26,27,29,30,and 31, while all other observations are significantly larger. Let's replace the 0 with an NA here, then impute.
+
+```{r}
+ChemicalManufacturingProcess[108,paste0("ManufacturingProcess",c(25,26,27,29,30,31))] <- NA
+```
+
+Start with impute.knn.
+
+```{r}
+ChemicalManufacturingProcess_imputed <- impute.knn(as.matrix(ChemicalManufacturingProcess),k=10,rng.seed=1392)
+
+ChemicalManufacturingProcess_imputed <- data.frame(ChemicalManufacturingProcess_imputed$data,check.names=FALSE,stringsAsFactors=FALSE)
+```
+
+For manufacturing processes 2 and 28, they are actually bimodal, with a bunch of zeroes then continuous numeric variables that are much larger.
+
+If the imputed value is less than the half the minimum of non-zero values, change to 0.
+
+Also round to match previous level of precision.
+
+```{r}
+for(var in c("ManufacturingProcess02","ManufacturingProcess28"))
+{
+	half_min_value <- min(ChemicalManufacturingProcess[ChemicalManufacturingProcess[,var] > 0,var],na.rm=TRUE)/2
+	ChemicalManufacturingProcess_imputed[which(is.na(ChemicalManufacturingProcess[,var]) == TRUE & ChemicalManufacturingProcess_imputed[,var] < half_min_value),var] <- 0
+	ChemicalManufacturingProcess_imputed[,var] <- round(ChemicalManufacturingProcess_imputed[,var],digits=1)
+	print(table(ChemicalManufacturingProcess[,var],useNA="ifany"))
+	print(table(ChemicalManufacturingProcess_imputed[,var],useNA="ifany"))
+}
+```
+
+For remaining variables, imputed values from impute.knn looked good. Just round to the appropriate level of precision within the imputed values.
+
+```{r}
+NAs_per_var <- as.numeric(as.vector(apply(ChemicalManufacturingProcess,2,function(x)length(which(is.na(x) == TRUE)))))
+
+vars_with_NAs <- colnames(ChemicalManufacturingProcess)[NAs_per_var > 0]
+
+vars_with_NAs <- setdiff(vars_with_NAs,c("ManufacturingProcess02","ManufacturingProcess28"))
+```
+
+```{r}
+digits_precision <- c(1,2,0,1,1,0,0,1,1,rep(0,times=8),1,1,1,0,1,0,3,1,2)
+
+for(i in 1:length(vars_with_NAs))
+{
+	var = vars_with_NAs[i]
+	digits = digits_precision[i]
+
+	ChemicalManufacturingProcess_imputed[,var] <- round(ChemicalManufacturingProcess_imputed[,var],digits=digits)
+}
+```	
+
+Next, we are asked to split the data into training and test sets, pre-process (presumably transformations like Box-Cox and center/scale), and train several different models.
+
+Let's use an 80/20 split.
+
+
