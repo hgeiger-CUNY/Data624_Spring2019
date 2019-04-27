@@ -1,0 +1,443 @@
+---
+title: "KJ 7.5"
+author: "Heather Geiger"
+output:
+  html_document:
+    smart: no
+  pdf_document: default
+---
+
+# Libraries
+
+Load libraries.
+
+```{r,message=FALSE,warning=FALSE}
+library(AppliedPredictiveModeling)
+library(mlbench)
+library(caret)
+#library(earth)
+library(impute)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+```
+
+# Set up question data.
+
+## Initial data loading
+
+A chemical manufacturing process for a pharmaceutical product was discussed previously.
+
+In this problem, the objective is to understand the relationship between biological measurements of the raw materials (predictors), measurements of the manufacturing process (predictors), and the response of product yield. 
+
+Biological predictors cannot be changed but can be used to assess the quality of the raw material before processing. On the other hand, manufacturing process predictors can be changed in the manufacturing process. Improving product yield by 1 % will boost revenue by approximately one hundred thousand dollars per batch.
+
+Load the data in R.
+
+```{r}
+data(ChemicalManufacturingProcess)
+```
+
+## Impute missing values.
+
+A small percentage of cells in the predictor set contain missing values. We are asked to use an imputation function to fill in these missing values.
+
+We find the following NAs in the data.
+
+* Row 1 - Has 11 variables where this row is the only NA for that variable: manufacturing processes 1,4,5,7,8,12,22,23,24,40,41 
+* Row 23 - Has 1 variable where this row is the only NA for that variable: manufacturing process 14
+* Rows 172,173,174,175,176 - Have NAs in manufacturing processes 25-31,33-36 (not 32!)
+* Rows 1,2,3,4,5,6,22,23,24 - Have NAs in manufacturing processes 3,10, and 11
+
+* Manufacturing process 6 - has NA in rows 1 and 90
+* Manufacturing process 2 - has NA in rows 1,134, and 139
+
+* Manufacturing process 3 - also has NA in rows 15-20
+* Manufacturing process 11 - also has NA in row 98
+
+We also find a few outliers that I believe would be good to replace with an NA and impute. These are:
+
+* One row (108) has a 0 for mps 25,26,27,29,30,and 31, while all other observations are significantly larger. 
+* Mps 16, 18, and 20 all have one zero, while remaining values are >4000.
+* Mps 22, 23, 38, 39, 42, 44 and 45 each have a handful of zeros. In most of these variables, these zeros are unusually small relative to the nonzero values. Even when this is not the case (nonzero values aren't that large), the zeroes are also recurrent within a few rows in a way that makes them seem suspect.
+
+```{r}
+for(var in paste0("ManufacturingProcess",c(16,18,20,22,23,25,26,27,29,30,31,38,39,42,44,45)))
+{
+    zero_indices <- which(ChemicalManufacturingProcess[,var] == 0 & is.na(ChemicalManufacturingProcess[,var]) == FALSE)
+    ChemicalManufacturingProcess[zero_indices,var] <- NA
+}
+```
+
+Start with impute.knn.
+
+```{r}
+ChemicalManufacturingProcess_imputed <- impute.knn(as.matrix(ChemicalManufacturingProcess),k=10,rng.seed=1392)
+
+ChemicalManufacturingProcess_imputed <- data.frame(ChemicalManufacturingProcess_imputed$data,check.names=FALSE,stringsAsFactors=FALSE)
+```
+
+For manufacturing processes 2 and 28, they are actually bimodal, with a bunch of zeroes then continuous numeric variables that are much larger.
+
+If the imputed value is less than the half the minimum of non-zero values, change to 0.
+
+Also round to match previous level of precision.
+
+```{r}
+for(var in c("ManufacturingProcess02","ManufacturingProcess28"))
+{
+	half_min_value <- min(ChemicalManufacturingProcess[ChemicalManufacturingProcess[,var] > 0,var],na.rm=TRUE)/2
+	ChemicalManufacturingProcess_imputed[which(is.na(ChemicalManufacturingProcess[,var]) == TRUE & ChemicalManufacturingProcess_imputed[,var] < half_min_value),var] <- 0
+	ChemicalManufacturingProcess_imputed[,var] <- round(ChemicalManufacturingProcess_imputed[,var],digits=1)
+}
+```
+
+For remaining variables, imputed values from impute.knn looked good. Just round to the appropriate level of precision within the imputed values.
+
+```{r}
+NAs_per_var <- as.numeric(as.vector(apply(ChemicalManufacturingProcess,2,function(x)length(which(is.na(x) == TRUE)))))
+
+vars_with_NAs <- colnames(ChemicalManufacturingProcess)[NAs_per_var > 0]
+
+vars_with_NAs <- setdiff(vars_with_NAs,c("ManufacturingProcess02","ManufacturingProcess28"))
+
+vars_with_NAs <- setdiff(vars_with_NAs,paste0("ManufacturingProcess",c(16,18,20,38,39,42,44,45))) #Initially did not include these variables when manually calculated appropriate precision. Will round these in a separate loop.
+
+digits_precision <- c(1,2,0,1,1,0,0,1,1,rep(0,times=8),1,1,1,0,1,0,3,1,2)
+```
+
+```{r,echo=TRUE,eval=TRUE}
+for(i in 1:length(vars_with_NAs))
+{
+	var = vars_with_NAs[i]
+	digits = digits_precision[i]
+
+	ChemicalManufacturingProcess_imputed[,var] <- round(ChemicalManufacturingProcess_imputed[,var],digits=digits)
+}
+```	
+
+```{r}
+vars_with_NAs <- paste0("ManufacturingProcess",c(16,18,20,38,39,42,44,45))
+
+digits_precision <- c(0,0,0,0,1,1,1,1)
+
+for(i in 1:length(vars_with_NAs))
+{
+    var = vars_with_NAs[i]
+    digits = digits_precision[i]
+
+    ChemicalManufacturingProcess_imputed[,var] <- round(ChemicalManufacturingProcess_imputed[,var],digits=digits)
+}
+```
+
+## Data exploration and additional manual transformation
+
+Look at distribution of yield.
+
+```{r,fig.width=6,fig.height=6}
+hist(ChemicalManufacturingProcess_imputed$Yield,labels=TRUE,xlab="",ylab="Observations",main="Yield")
+```
+
+And of biological variables.
+
+```{r,fig.width=10,fig.height=6}
+par(mfrow=c(3,4))
+
+for(i in 2:13)
+{
+    hist(ChemicalManufacturingProcess_imputed[,i],
+        xlab="",ylab="Observations",main=colnames(ChemicalManufacturingProcess_imputed)[i],labels=TRUE)
+}
+```
+
+All except 7 look like standard continuous variables, whether normally distributed or skewed.
+
+For BiologicalMaterial07, there are actually 173 observations with 100 and 3 with 100.83, no in between. 
+
+Convert to binary where 0 = 100 and 1 = 100.83.
+
+```{r}
+ChemicalManufacturingProcess[,"BiologicalMaterial07"] <- ifelse(ChemicalManufacturingProcess[,"BiologicalMaterial07"] > 100,1,0)
+```
+
+Now, on to manufacturing processes.
+
+```{r}
+mps_data <- ChemicalManufacturingProcess_imputed[,14:ncol(ChemicalManufacturingProcess)]
+
+unique_per_mp <- apply(mps_data,2,function(x)length(unique(x)))
+
+mps_data_for_barplots <- mps_data[,unique_per_mp < 12]
+mps_data_for_histograms <- mps_data[,unique_per_mp >= 14]
+
+mps_data_barplot_nonpanel <- as.numeric(as.vector(mps_data[,unique_per_mp == 12]))
+```
+
+```{r,fig.width=10,fig.height=6}
+par(mfrow=c(3,4))
+
+for(i in 1:ncol(mps_data_for_barplots))
+{
+    mps_data_for_barplots[,i] <- factor(mps_data_for_barplots[,i],levels=unique(mps_data_for_barplots[,i])[order(unique(mps_data_for_barplots[,i]))])
+    barplot(table(mps_data_for_barplots[,i]),ylab="Observations",main=colnames(mps_data_for_barplots)[i])
+}
+```
+
+```{r,fig.width=6,fig.height=6}
+barplot(table(mps_data_barplot_nonpanel),ylab="Observations",main=colnames(mps_data)[unique_per_mp == 12])
+```
+
+We find a few variables that should be converted to binary.
+
+We also have a few (e.g. mp 23) that may actually be counts vs. continuous, but we can still treat them the same as we would a numeric variable.
+
+Don't think we need to worry about special transformation on the ones with more than two unique values.
+
+```{r,fig.width=10,fig.height=12}
+par(mfrow=c(8,4))
+
+for(i in 1:ncol(mps_data_for_histograms))
+{
+    hist(mps_data_for_histograms[,i],
+        xlab="",ylab="Obs",main=colnames(mps_data_for_histograms)[i],labels=TRUE)
+}
+```
+
+As mentioned earlier, mps 2 and 28 have a bunch of zeroes, then larger values.
+
+Looks like we probably should have also done the 0 to NA then impute for mp 1 earlier. We should do that now along with converting select variables to binary.
+
+All other variables appear to be standard numeric variables with various degrees of skew.
+
+```{r}
+formerly_zero <- which(ChemicalManufacturingProcess_imputed[,"ManufacturingProcess01"] == 0)
+
+ChemicalManufacturingProcess_imputed[formerly_zero,"ManufacturingProcess01"] <- NA
+
+ChemicalManufacturingProcess_imputed <- impute.knn(as.matrix(ChemicalManufacturingProcess_imputed),k=10,rng.seed=1392)
+
+ChemicalManufacturingProcess_imputed <- data.frame(ChemicalManufacturingProcess_imputed$data,check.names=FALSE,stringsAsFactors=FALSE)
+
+ChemicalManufacturingProcess_imputed[,"ManufacturingProcess01"] <- round(ChemicalManufacturingProcess_imputed[,"ManufacturingProcess01"],digits=1)
+```
+
+```{r}
+unique_values_per_var <- apply(ChemicalManufacturingProcess_imputed,2,function(x)length(unique(x)))
+
+for(var in which(unique_values_per_var == 2))
+{
+    ChemicalManufacturingProcess_imputed[,var] <- ifelse(ChemicalManufacturingProcess_imputed[,var] == min(ChemicalManufacturingProcess_imputed[,var]),0,1)
+}
+```
+
+## Automated data transformation and redo exploration
+
+Let's move on to cleaning up in a more automated way using the preProcess function.
+
+Then, I will show code to explore the now-transformed values. Not running this to avoid this becoming too long, but I checked and transformations looked reasonable.
+
+```{r}
+ChemicalManufacturingProcess_predictors_imputed_not_cleaned <- ChemicalManufacturingProcess_imputed[,2:ncol(ChemicalManufacturingProcess_imputed)]
+
+preProcess_params <- preProcess(ChemicalManufacturingProcess_predictors_imputed_not_cleaned,
+                                method=c("BoxCox","center","scale"))
+
+ChemicalManufacturingProcess_predictors_imputed_cleaned <- predict(preProcess_params,ChemicalManufacturingProcess_predictors_imputed_not_cleaned)
+```
+
+```{r,fig.width=10,fig.height=6,echo=TRUE,eval=FALSE}
+par(mfrow=c(3,4))
+
+for(i in 1:12)
+{
+hist(ChemicalManufacturingProcess_predictors_imputed_cleaned[,i],        
+    xlab="",ylab="Observations",main=colnames(ChemicalManufacturingProcess_predictors_imputed_cleaned)[i],labels=TRUE)
+}
+```
+
+```{r,fig.width=10,fig.height=6,echo=TRUE,eval=FALSE}
+par(mfrow=c(3,4))
+
+for(i in 1:12)
+{
+plot(ChemicalManufacturingProcess_predictors_imputed_not_cleaned[,i],
+    ChemicalManufacturingProcess_predictors_imputed_cleaned[,i],
+    xlab="Before",
+    ylab="After",
+    main=colnames(ChemicalManufacturingProcess_predictors_imputed_cleaned)[i])
+}
+```
+
+```{r,fig.width=10,fig.height=16,echo=TRUE,eval=FALSE}
+par(mfrow=c(9,5))
+
+for(i in 13:ncol(ChemicalManufacturingProcess_predictors_imputed_cleaned))
+{
+hist(ChemicalManufacturingProcess_predictors_imputed_cleaned[,i],
+    xlab="",ylab="Obs",main=colnames(ChemicalManufacturingProcess_predictors_imputed_cleaned)[i],labels=TRUE)
+}
+```
+
+```{r,fig.width=10,fig.height=16,echo=TRUE,eval=FALSE}
+par(mfrow=c(9,5))
+
+for(i in 13:ncol(ChemicalManufacturingProcess_predictors_imputed_cleaned))
+{
+plot(ChemicalManufacturingProcess_predictors_imputed_not_cleaned[,i],
+    ChemicalManufacturingProcess_predictors_imputed_cleaned[,i],
+    xlab="Before",
+    ylab="After",
+    main=colnames(ChemicalManufacturingProcess_predictors_imputed_cleaned)[i])
+}
+```
+
+## Training-test split
+
+Now we just need to split the data into an 80-20 training-test split.
+
+```{r}
+set.seed(1392)
+trainIndex <- createDataPartition(ChemicalManufacturingProcess$Yield,p=.8,list = FALSE,times=1)
+
+ChemicalManufacturingProcess_transformed <- data.frame(Yield = ChemicalManufacturingProcess$Yield,ChemicalManufacturingProcess_predictors_imputed_cleaned,stringsAsFactors=FALSE)
+
+trainingData <- ChemicalManufacturingProcess_transformed[trainIndex,]
+testData <- ChemicalManufacturingProcess_transformed[-trainIndex,]
+
+trainingData <- list(x = trainingData[,2:ncol(trainingData)],y = trainingData$Yield)
+testData <- list(x = testData[,2:ncol(testData)],y = testData$Yield)
+```
+
+# Building models
+
+## Set seed.
+
+Set seed before we run all these models.
+
+```{r}
+set.seed(1392)
+```
+
+## Linear model
+
+Let's look at what variables are included in a linear model.
+
+```{r}
+linear_model <- step(lm(Yield ~ .,data=data.frame(Yield = trainingData$y,trainingData$x)),trace=FALSE)
+
+summary(linear_model)
+```
+
+Get the top 10 most important predictors.
+
+```{r}
+coefficients <- as.numeric(as.vector(coef(linear_model)))
+coefficients  <- coefficients[2:length(coefficients)]
+
+coefficients <- data.frame(Variable = names(coef(linear_model))[2:length(coef(linear_model))],
+                    Coef.absv = abs(coefficients),
+                    Direction = ifelse(coefficients >= 0,"+","-"))
+
+coefficients[order(coefficients$Coef.absv,decreasing=TRUE)[1:10],]
+```
+
+It appears that manufacturing processes have the most influence in the linear model.
+
+## Neural networks
+
+Let's try the neural networks method with model averaging.
+
+```{r avg-nnet-7.5,cache=TRUE,message=FALSE,warning=FALSE}
+nnetGrid <- expand.grid(.decay = c(0, 0.01, .1),
+                .size = c(1:10),
+                .bag = FALSE)
+
+averaging_nnet_model <- train(trainingData$x,trainingData$y,
+                            method="avNNet",
+                            tuneGrid = nnetGrid,
+                            trControl = trainControl(method = "cv", number = 10),
+                            preProc = c("center", "scale"),
+                            linout = TRUE,
+                            trace=FALSE,
+                            maxit = 500)
+```
+
+## Multivariate Adaptive Regression Splines (MARS)
+
+Use the earth command from the earth package.
+
+```{r MARS-model-7.5,message=FALSE,warning=FALSE,cache=TRUE}
+MARS_model <- earth(trainingData$x,trainingData$y)
+```
+
+## Support Vector Machine (SVM)
+
+I tried running SVM with a polynomial kernel here, but runtime was impractically long.
+
+However, I will try running with both a linear and radial basis function kernel.
+
+```{r SVM-linear-kernel-7.5,message=FALSE,warning=FALSE,cache=TRUE}
+SVM_linear_model <- train(trainingData$x,trainingData$y,
+                        method="svmLinear",
+                        trControl = trainControl(method = "cv", number = 10),
+                        preProc = c("center", "scale"),
+                        tuneLength = 14)
+```
+
+```{r SVM-RBF-kernel-7.5,message=FALSE,warning=FALSE,cache=TRUE}
+SVM_RBF_model <- train(trainingData$x,trainingData$y,
+                    method="svmRadial",
+                    trControl = trainControl(method = "cv", number = 10),
+                    preProc = c("center", "scale"),
+                    tuneLength = 14)
+```
+
+## K-Nearest Neighbors (KNN)
+
+Let's run KNN just as it was run in the question example for 7.2.
+
+```{r knn-model-7.5,cache=TRUE}
+knn_model <- train(x = trainingData$x,
+                y = trainingData$y,
+                method = "knn",
+                preProc = c("center", "scale"),
+                tuneLength = 10)
+```
+
+# Comparing nonlinear models
+
+Use the function to look at error and R-squared of a given model applied to the test data.
+
+```{r}
+error_and_Rsquared <- function(model){
+    predictions <- predict(model,newdata = testData$x)
+    return(postResample(pred = predictions, obs = testData$y))
+}
+```
+
+Also add a function to get error and Rsquared running model on training data.
+
+```{r}
+error_and_Rsquared_train <- function(model){
+    predictions <- predict(model,newdata = trainingData$x)
+    return(postResample(pred = predictions, obs = trainingData$y))
+}
+```
+
+Run function to get error and R-squared for each model on test data.
+
+```{r}
+for(model in c("averaging_nnet_model","MARS_model","SVM_linear_model","SVM_RBF_model","knn_model"))
+{
+    print(model)
+    print(error_and_Rsquared(get(model)))
+}
+```
+
+```{r}
+for(model in c("averaging_nnet_model","MARS_model","SVM_linear_model","SVM_RBF_model","knn_model"))
+{
+    print(model)
+    print(error_and_Rsquared_train(get(model)))
+}
+```
