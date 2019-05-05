@@ -1,0 +1,617 @@
+---
+title: pH Prediction Exploration and Transformation
+author: Heather Geiger
+output:
+ html_document:
+  smart: false
+---
+
+# Libraries
+
+```{r, message=FALSE,warning=FALSE}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(gridExtra)
+library(VennDiagram)
+library(corrplot)
+```
+
+# Exploratory analysis
+
+## Read in data.
+
+Read in CSV files, which are just the CSV versions of the original Excel sheets.
+
+```{r}
+training <- read.csv("pH_prediction_training_data.csv",header=TRUE,stringsAsFactors=FALSE)
+test <- read.csv("pH_prediction_test_data.csv",header=TRUE,stringsAsFactors=FALSE)
+```
+
+Set aside target (PH) from training into a separate variable. Remove entirely from test.
+
+Then, combine training and test into one data frame.
+
+```{r}
+training_target <- training$PH
+
+training <- training[,setdiff(colnames(training),"PH")]
+test <- test[,colnames(training)]
+
+alldata <- data.frame(rbind(training,test),
+    Data = rep(c("Training","Test"),times=c(nrow(training),nrow(test))),
+    stringsAsFactors=FALSE)
+```
+
+## Within variables
+
+### Unique values per variable
+
+One useful quick thing to check can be the number and type of unique values per variable.
+
+If for example there are only 12 unique values, and those values are 1-12, then you know that the variable may represent counts rather than a continuous numeric range.
+
+```{r}
+unique_per_var <- apply(alldata,2,function(x)length(unique(x)))
+```
+
+```{r,echo=FALSE}
+print("List of number of unique values per variable:")
+```
+
+```{r}
+unique_per_var[order(unique_per_var)]
+```
+
+```{r,echo=FALSE}
+print("Count of unique values per variable for select variables:")
+```
+
+```{r}
+vars_with_relatively_few_unique <- colnames(alldata)[order(unique_per_var)[2:6]]
+
+apply(alldata[,vars_with_relatively_few_unique],2,function(x)table(x,useNA="ifany"))
+```
+
+Looks like brand is blank for a significant number of observations.
+
+In Pressure.Setpoint, the vast majority of values are multiples of 2. So the ones that are between multiples (45.2, 46.4, 46.6, and 46.8) are unusual.
+
+Similarly in Bowl.Setpoint, 122, 126, and 134 are unusual in being not multiples of 10.
+
+### Zeros per variable
+
+Sometimes variables will have a distribution where there are many zeros, but then the nonzero part of the distribution looks like a relatively standard continuous numeric variable.
+
+Let's see if this is the case for any of the variables here.
+
+```{r}
+num_zeros_per_var <- rep(0,times=ncol(alldata))
+
+for(i in 1:ncol(alldata))
+{
+    num_zeros_per_var[i] <- length(which(is.na(alldata[,i]) == FALSE & alldata[,i] == 0))
+}
+
+names(num_zeros_per_var) <- colnames(alldata)
+
+num_zeros_per_var[num_zeros_per_var > 0]
+```
+
+We find the Hyd.Pressure variables have a very large number of observations equal to 0.
+
+### Repeated values per variable
+
+Any notable often-repeated nonzero values?
+
+```{r}
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+```
+
+```{r}
+nonzero_mode_per_var <- data.frame(Variable = colnames(alldata),
+    Num.unique = unique_per_var,
+    Most.common.nonzero.value = rep(NA,times=ncol(alldata)),
+    Num.obs = rep(NA,times=ncol(alldata)),
+    stringsAsFactors=FALSE,check.names=FALSE,
+    row.names=colnames(alldata))
+
+for(i in 1:ncol(alldata))
+{
+    mymode <- Mode(alldata[alldata[,i] != 0,i])
+    nonzero_mode_per_var$Most.common.nonzero.value[i] <- mymode
+    nonzero_mode_per_var$Num.obs[i] <- length(which(alldata[,i] == mymode))
+}
+```
+
+```{r}
+nonzero_mode_per_var <- nonzero_mode_per_var[nonzero_mode_per_var$Num.unique >= 30,]
+nonzero_mode_per_var <- nonzero_mode_per_var[which(is.na(nonzero_mode_per_var$Most.common.nonzero.value) == FALSE),]
+
+nonzero_mode_per_var[order(nonzero_mode_per_var$Num.obs,decreasing=TRUE),2:4]
+```
+
+Get table for top most common values for a few of these variables.
+
+```{r}
+for(var in c("Mnf.Flow","Hyd.Pressure2","Hyd.Pressure3"))
+{
+    print(var)
+    freq_per_var <- data.frame(table(alldata[,var]))
+    print(freq_per_var[order(freq_per_var$Freq,decreasing=TRUE)[1:5],])
+}
+```
+
+We find that Mnf.Flow most common values are -100.2/-100 (together over half of observations), then 0.2 (92 observations).
+
+In addition to the zeros, Hyd.Pressure 2 and 3 each have another repeated value (0.2 for Hyd.Pressure2, -1.2 for Hyd.Pressure3).
+
+### Missing values
+
+How many missing values do we find per variable?
+
+```{r}
+missing_per_var <- rep(0,times=ncol(alldata))
+
+for(i in 1:ncol(alldata))
+{
+    missing_per_var[i] <- length(which(is.na(alldata[,i]) == TRUE))
+}
+
+names(missing_per_var) <- colnames(alldata)
+
+missing_per_var[order(missing_per_var)]
+```
+
+We find most variables are missing in at least a few observations. Including, brand code should maybe have some as well, once we convert the blanks to NA.
+
+How many missing variables do we tend to find in a given observation?
+
+```{r}
+missing_per_obs <- apply(alldata,1,function(x)length(which(is.na(x) == TRUE)))
+
+table(missing_per_obs)
+```
+
+Most observations are only missing data for at most one or two variables, which is good.
+
+### Overall distribution of values
+
+Let's make a simple histogram (or barplot if categorical) per variable.
+
+```{r}
+alldata$Brand.Code[alldata$Brand.Code == ""] <- "Empty"
+```
+
+```{r, fig.width=12,fig.height=24}
+par(mfrow=c(8,4))
+
+barplot(table(alldata$Brand.Code),ylab="Obs")
+
+for(var in setdiff(colnames(alldata),c("Data","Brand.Code")))
+{
+    hist(alldata[,var],ylab="Obs",xlab="",main=var,labels=TRUE)
+}
+```
+
+For a few of the variables that had zeros, let's also plot original histogram side-by-side with histogram of nonzero values.
+
+Also remove the one very low outlier in Hyd.Pressure.
+
+```{r, fig.width=12,fig.height=6}
+par(mfrow=c(2,4))
+
+var = "Balling.Lvl"
+
+hist(alldata[,var],ylab="Obs",xlab="",main=var,labels=TRUE)
+hist(alldata[alldata[,var] != 0,var],ylab="Obs",xlab="",main=paste0(var," != 0"),labels=TRUE)
+
+for(var in c("Hyd.Pressure1","Hyd.Pressure2","Hyd.Pressure3"))
+{
+    hist(alldata[alldata[,var] > -40,var],ylab="Obs",xlab="",main=paste0(var," > -40"),labels=TRUE)
+    hist(alldata[alldata[,var] != 0 & alldata[,var] > -40,var],ylab="Obs",xlab="",main=paste0(var," != 0, > -40"),labels=TRUE)
+}
+```
+
+We see variables with various patterns including bimodal or multimodal, varying degrees of skew, and a few particular values being especially common.
+
+Looks like for Hyd.Pressure 1,2, and 3, most values are much larger than zero if they are not exactly equal to 0.
+
+## Between variables
+
+### Co-occurence of zeros?
+
+One quick obvious thing to check is the correlation between the different Hyd.Pressure variables.
+
+First, do the zeros often co-occur?
+
+```{r}
+zero_hyd1 <- which(alldata[,"Hyd.Pressure1"] == 0 & is.na(alldata[,"Hyd.Pressure1"]) == FALSE)
+zero_hyd2 <- which(alldata[,"Hyd.Pressure2"] == 0 & is.na(alldata[,"Hyd.Pressure2"]) == FALSE)
+zero_hyd3 <- which(alldata[,"Hyd.Pressure3"] == 0 & is.na(alldata[,"Hyd.Pressure3"]) == FALSE)
+
+list_for_venn <- list(Hyd.1 = zero_hyd1,Hyd.2 = zero_hyd2,Hyd.3 = zero_hyd3)
+
+object_for_venn <- venn.diagram(list_for_venn,main="Observations with var = 0",filename=NULL)
+
+grid.draw(object_for_venn)
+```
+
+Yes, it seems like they definitely do!
+
+One more thing - let's just look a bit more in detail at the observations where Hyd.Pressure2 = 0.2 and/or Hyd.Pressure3 = -1.2.
+
+Have a feeling at least some of these should be 0.
+
+```{r}
+length(which(alldata$Hyd.Pressure2 == 0.2))
+length(which(alldata$Hyd.Pressure2 == 0.2 & alldata$Hyd.Pressure1 == 0 & alldata$Hyd.Pressure3 == 0))
+```
+
+```{r}
+length(which(alldata$Hyd.Pressure3 == -1.2))
+length(which(alldata$Hyd.Pressure3 == -1.2 & alldata$Hyd.Pressure1 == 0))
+```
+
+Also, let's print the observations where:
+
+* Hyd.Pressure 1 and 2 are 0, but 3 is not (1 observation)
+* Hyd.Pressure 3 is 0, but 1 is not (2 observations)
+* Hyd.Pressure 1 is 0, but 3 is not, and 3 is also not -1.2 (32 - 26 = 6 observations)
+
+```{r}
+myindices <- which(alldata$Hyd.Pressure1 == 0 & alldata$Hyd.Pressure2 == 0 & alldata$Hyd.Pressure3 != 0)
+
+alldata[myindices,paste0("Hyd.Pressure",1:3)]
+
+myindices <- which(alldata$Hyd.Pressure3 == 0 & alldata$Hyd.Pressure1 != 0)
+
+alldata[myindices,paste0("Hyd.Pressure",1:3)]
+
+zero_hyd1 <- which(alldata$Hyd.Pressure1 == 0)
+zero_or_neg1.2_hyd3 <- which(alldata$Hyd.Pressure3 == 0 | alldata$Hyd.Pressure3 == -1.2)
+
+myindices <- setdiff(zero_hyd1,zero_or_neg1.2_hyd3)
+
+alldata[myindices,paste0("Hyd.Pressure",1:3)]
+```
+
+Looks like we may want to convert 0.2 to 0 for Hyd.Pressure2 when both Hyd.Pressure 1 and 3 are 0.
+
+Same idea for Hyd.Pressure3. Convert -1.2 to 0 when Hyd.Pressure 1 is 0.
+
+Finally, convert 0.2 to 0 for Hyd.Pressure 1 and 2 when 3 = 0.
+
+Oh, and convert NA to 0 when 2/3 are NA and 1 is 0.
+
+Not 100% sure these conversions are correct, so let's also set aside the original data.
+
+```{r}
+alldata_original <- alldata
+
+alldata[which(alldata$Hyd.Pressure2 == 0.2 & alldata$Hyd.Pressure1 == 0 & alldata$Hyd.Pressure3 == 0),"Hyd.Pressure2"] <- 0
+alldata[which(alldata$Hyd.Pressure3 == -1.2 & alldata$Hyd.Pressure1 == 0),"Hyd.Pressure3"] <- 0
+
+myindices <- which(alldata$Hyd.Pressure1 == 0.2 & alldata$Hyd.Pressure2 == 0.2 & alldata$Hyd.Pressure3 == 0)
+
+alldata[myindices,"Hyd.Pressure1"] <- 0
+alldata[myindices,"Hyd.Pressure2"] <- 0
+
+myindices <- which(alldata$Hyd.Pressure1 == 0 & is.na(alldata$Hyd.Pressure2) == TRUE & is.na(alldata$Hyd.Pressure3) == TRUE)
+
+alldata[myindices,"Hyd.Pressure2"] <- 0
+alldata[myindices,"Hyd.Pressure3"] <- 0
+
+myindices <- which(alldata$Hyd.Pressure1 == 0 & alldata$Hyd.Pressure3 == 0 & alldata$Hyd.Pressure2 == 0.2)
+
+alldata[myindices,"Hyd.Pressure2"] <- 0
+```
+
+```{r,echo=FALSE,eval=FALSE}
+#Making Venn to double check filtering went correctly.
+
+zero_hyd1 <- which(alldata[,"Hyd.Pressure1"] == 0 & is.na(alldata[,"Hyd.Pressure1"]) == FALSE)
+zero_hyd2 <- which(alldata[,"Hyd.Pressure2"] == 0 & is.na(alldata[,"Hyd.Pressure2"]) == FALSE)
+zero_hyd3 <- which(alldata[,"Hyd.Pressure3"] == 0 & is.na(alldata[,"Hyd.Pressure3"]) == FALSE)
+
+list_for_venn <- list(Hyd.1 = zero_hyd1,Hyd.2 = zero_hyd2,Hyd.3 = zero_hyd3)
+
+object_for_venn <- venn.diagram(list_for_venn,main="Observations with var = 0 after clean",filename=NULL)
+
+grid.draw(object_for_venn)
+```
+
+```{r,echo=FALSE,eval=FALSE}
+#Venn did not show the following:
+#One obs with 0 in 1, but not 2 or 3
+#One obs with 0 in 1 and 2, but not 3
+
+#Make sure these are still there.
+
+myindices <- which(alldata$Hyd.Pressure1 == 0 & alldata$Hyd.Pressure2 != 0 & alldata$Hyd.Pressure3 != 0)
+
+alldata[myindices,paste0("Hyd.Pressure",1:3)]
+
+myindices <- which(alldata$Hyd.Pressure1 == 0 & alldata$Hyd.Pressure2 == 0 & alldata$Hyd.Pressure3 != 0)
+
+alldata[myindices,paste0("Hyd.Pressure",1:3)]
+```
+
+Now, just curious, what do the other two variables look like when Hyd.Pressure2 is 0.2 or Hyd.Pressure3 is -1.2?
+
+```{r}
+myindices1 <- which(alldata$Hyd.Pressure2 == 0.2)
+
+myindices2 <- which(alldata$Hyd.Pressure3 == -1.2)
+
+length(myindices1)
+length(myindices2)
+
+length(intersect(myindices1,myindices2))
+
+hyd1_when_hyd2plus3_repeated_values <- as.numeric(as.vector(alldata[myindices1,"Hyd.Pressure1"]))
+
+table(hyd1_when_hyd2plus3_repeated_values[order(hyd1_when_hyd2plus3_repeated_values)])
+```
+
+After some transformations in other rows to 0, looks like Hyd.Pressure2 = 0.2 and Hyd.Pressure3 = -1.2 always co-occur.
+
+Then Hyd.Pressure1 is within a range of different low values.
+
+### Correlations between certain specific variables
+
+Next, make scatterplots looking at correlation including nonzero values for Hyd.Pressure 1-4.
+
+```{r,fig.width=12,fig.height=12}
+pairs(alldata[alldata[,"Hyd.Pressure1"] > -40,paste0("Hyd.Pressure",1:4)],lower.panel=NULL,main="Minus 1/2/3 < -40 observation")
+```
+
+Other than the common zeros, the Hyd.Pressure variables are not quite as correlated as I expected.
+
+Some correlation between 2 and 3, but it is not that strong other than when both are very low.
+
+### Correlations between all predictors
+
+Now, time to take an unbiased look and see which variables are most correlated.
+
+For now, exclude Hyd.Pressure1-3 and Mnf.Flow from this since they have very oft-repeated values. Also exclude the categorical variables.
+
+```{r,fig.width=6,fig.height=6}
+alldata_for_correlations <- alldata[,setdiff(colnames(alldata),c("Data","Brand.Code","Hyd.Pressure1","Hyd.Pressure2","Hyd.Pressure3","Mnf.Flow"))]
+
+corrplot(cor(alldata_for_correlations,use="pairwise.complete.obs"),type="upper",diag=FALSE)
+```
+
+We find the following very strong correlations:
+
+* Carb.Volume with Density, Balling, Alch.Rel, Carb.Rel, and Balling.Lvl (and correlations within these as well)
+* Carb.Pressure with Carb.Temp
+* Filler.Level with Bowl.Setpoint
+* Filler.Speed with MFR
+
+Let's make some scatterplots!
+
+```{r,fig.width=12,fig.height=12}
+pairs(alldata[,c("Carb.Volume","Density","Balling","Alch.Rel","Carb.Rel","Balling.Lvl")],lower.panel=NULL)
+```
+
+```{r}
+par(mfrow=c(2,2))
+
+plot(alldata$Balling,alldata$Density,xlab="Balling",ylab="Density",
+    ylim=c(-.20,max(alldata$Density,na.rm=TRUE)))
+
+model1_indices <- which(alldata$Density > (0.4*alldata$Balling))
+model2_indices <- which(alldata$Density <= (0.4*alldata$Balling))
+model2_indices <- setdiff(model2_indices,which(alldata$Density == min(alldata$Density,na.rm=TRUE)))
+
+abline(lm(Density ~ Balling,data=alldata[model1_indices,]),lty=2,col="red")
+abline(lm(Density ~ Balling,data=alldata[model2_indices,]),lty=2,col="blue")
+
+legend("topleft",
+    legend=c("y = .40x+.32","y = .40x-.17"),
+    col=c("red","blue"),lty=2,bty="n",cex=0.75)
+
+plot(alldata$Carb.Pressure,alldata$Carb.Temp,xlab="Carb.Pressure",ylab="Carb.Temp")
+plot(alldata$Filler.Level,alldata$Bowl.Setpoint,xlab="Filler.Level",ylab="Bowl.Setpoint")
+plot(alldata$Filler.Speed,alldata$MFR,xlab="Filler.Speed",ylab="MFR")
+```
+
+Looks like density and balling are actually almost perfectly correlated. Except, some points are modelled by a different relationship than others.
+
+For the remaining variables, the correlation coefficient generally makes sense with the scatterplot, but not always as expected. Sometimes, there is just a correlation when points from one modal peak of variable1 have higher values for variable2 than points from the other (lower) modal peak of variable1.
+
+Now, let's look at brand code vs. other variables.
+
+```{r,fig.width=12,fig.height=6}
+brand_code <- alldata$Brand.Code
+
+brand_code_dat <- data.frame(A = ifelse(alldata$Brand.Code == "A",1,0),
+    B = ifelse(alldata$Brand.Code == "B",1,0),
+    C = ifelse(alldata$Brand.Code == "C",1,0),
+    D = ifelse(alldata$Brand.Code == "D",1,0),
+    stringsAsFactors=FALSE)
+
+correlations_with_brand <- cor(brand_code_dat,alldata_for_correlations,use="pairwise.complete.obs")
+
+correlations_with_brand_max <- apply(correlations_with_brand,2,function(x)max(abs(x)))
+
+vars_corr_with_brand <- colnames(correlations_with_brand)[correlations_with_brand_max > 0.4]
+
+par(mfrow=c(2,4))
+
+for(var in vars_corr_with_brand)
+{
+    boxplot(alldata[,var] ~ alldata$Brand.Code,ylab=var)
+}
+```
+
+We find the following patterns.
+
+* Higher Carb.Volume, Carb.Pressure (effect not as strong), Density, Balling, Alch.Rel, Carb.Rel, and Balling.Lvl in brands A and D.
+* Lower Hyd.Pressure4 in brand D.
+
+For Hyd.Pressure 1-3, let's see if any patterns for where Hyd.Pressure1 is 0 vs. not.
+
+```{r,fig.width=12,fig.height=6}
+correlations_with_hyd_zero <- cor(ifelse(alldata$Hyd.Pressure1 == 0,1,0),alldata_for_correlations,use="pairwise.complete.obs")
+
+vars_corr_with_hyd_zero <- colnames(correlations_with_brand)[abs(correlations_with_hyd_zero) >= 0.4]
+
+zero_indices <- which(alldata$Hyd.Pressure1 == 0)
+nonzero_indices <- setdiff(1:nrow(alldata),zero_indices)
+
+par(mfrow=c(2,4))
+
+for(var in vars_corr_with_hyd_zero)
+{
+    if(var == "Filler.Level"){mybreaks=seq(from=50,to=170,by=10)}
+    if(var == "Pressure.Vacuum"){mybreaks=seq(from=-6.75,to=-3.5,by=0.25)}
+    if(var == "Bowl.Setpoint"){mybreaks=seq(from=70,to=140,by=10)}
+    if(var == "Pressure.Setpoint"){mybreaks=seq(from=42,to=54,by=2)}
+    hist(alldata[nonzero_indices,var],xlab=var,ylab="Obs",main="Hyd.Pressure1 != 0",breaks=mybreaks)
+    hist(alldata[zero_indices,var],xlab=var,ylab="Obs",main="Hyd.Pressure1 == 0",breaks=mybreaks)
+    if(var == "Pressure.Setpoint")
+    {
+        print(var)
+        print(table(alldata[nonzero_indices,var]))
+        print(table(alldata[zero_indices,var]))
+    }
+}
+```
+
+We find Filler.Level and Pressure.Vacuum are both higher when Hyd.Pressure1 = 0.
+
+For Bowl.Setpoint and Pressure.Setpoint, we find that the values tend to be less on the extremes and more toward more common values when Hyd.Pressure1 = 0.
+
+Another question - are Hyd.Pressure 1/2/3 correlated with other variables when nonzero?
+
+```{r}
+alldata_for_correlations <- alldata[nonzero_indices,setdiff(colnames(alldata),c("Data","Brand.Code","Mnf.Flow"))]
+
+correlations_with_hyd_nonzero <- cor(alldata_for_correlations,use="pairwise.complete.obs")
+
+correlations_with_hyd_nonzero <- correlations_with_hyd_nonzero[paste0("Hyd.Pressure",1:3),setdiff(colnames(correlations_with_hyd_nonzero),paste0("Hyd.Pressure",1:3))]
+
+max_correlations_with_hyd_nonzero <- apply(correlations_with_hyd_nonzero,2,function(x)max(abs(x)))
+
+correlations_with_hyd_nonzero[,max_correlations_with_hyd_nonzero >= 0.4]
+```
+
+```{r,fig.width=12,fig.height=8}
+par(mfrow=c(2,3))
+
+plot(alldata$Hyd.Pressure1,alldata$Carb.Pressure1,xlab="Hyd.Pressure1",ylab="Carb.Pressure1")
+plot(alldata$Hyd.Pressure1,alldata$Filler.Level,xlab="Hyd.Pressure1",ylab="Filler.Level")
+plot(alldata$Hyd.Pressure2,alldata$Filler.Speed,xlab="Hyd.Pressure2",ylab="Filler.Speed")
+plot(alldata$Hyd.Pressure2,alldata$MFR,xlab="Hyd.Pressure2",ylab="MFR")
+plot(alldata$Hyd.Pressure1,alldata$Bowl.Setpoint + rnorm(nrow(alldata),mean=0,sd=0.5),xlab="Hyd.Pressure1",ylab="Bowl.Setpoint")
+```
+
+Finally, look at Mnf.Flow at the repeated values vs. others.
+
+```{r}
+mnf_flow <- alldata$Mnf.Flow
+
+mnf_flow <- plyr::mapvalues(mnf_flow,
+    from=c(-100.2,-100,0.2,setdiff(unique(mnf_flow),c(-100.2,-100,0.2))),
+    to=c("-100.2","-100","0.2",rep("Other",times=length(unique(mnf_flow)) - 3)))
+
+mnf_flow_dat <- data.frame(Neg.100point2 = ifelse(mnf_flow == "-100.2",1,0),
+    Neg.100 = ifelse(mnf_flow == "-100",1,0),
+    Point2 = ifelse(mnf_flow == "0.2",1,0),
+    stringsAsFactors=FALSE)
+
+alldata_for_correlations <- alldata[,setdiff(colnames(alldata),c("Data","Brand.Code","Mnf.Flow"))]
+
+correlations_with_mnf_flow <- cor(mnf_flow_dat,alldata_for_correlations,use="pairwise.complete.obs")
+
+correlations_with_mnf_flow_max <- apply(correlations_with_mnf_flow,2,function(x)max(abs(x)))
+
+vars_corr_with_mnf_flow <- colnames(correlations_with_mnf_flow)[correlations_with_mnf_flow_max >= 0.4]
+
+par(mfrow=c(2,2))
+
+for(var in vars_corr_with_mnf_flow)
+{
+    boxplot(alldata[,var] ~ factor(mnf_flow),ylab=var,xlab="Mnf.Flow")
+}
+
+par(mfrow=c(1,1))
+
+boxplot(alldata[,"Hyd.Pressure1"] ~ factor(mnf_flow),ylab="Hyd.Pressure1",xlab="Mnf.Flow")
+```
+
+Looks like the zeros in Hyd.Pressure 1/2/3 frequently match up to Mnf.Flow <= 0.2.
+
+Mnf.Flow 0.2 is associated with much lower Filler.Speed.
+
+The lower repeated Mnf.Flow values are associated with higher Pressure.Vacuum.
+
+```{r}
+non_repeated_indices <- which(rowSums(mnf_flow_dat) == 0)
+
+alldata_for_correlations <- alldata[non_repeated_indices,setdiff(colnames(alldata),c("Data","Brand.Code","Mnf.Flow"))]
+
+correlations_with_mnf_flow <- cor(alldata$Mnf.Flow[non_repeated_indices],alldata_for_correlations,use="pairwise.complete.obs")
+
+vars_corr_with_mnf_flow <- colnames(alldata_for_correlations)[abs(correlations_with_mnf_flow) >= 0.4]
+
+vars_corr_with_mnf_flow
+
+par(mfrow=c(2,3))
+
+for(var in vars_corr_with_mnf_flow)
+{
+    if(var != "MFR" & var != "Oxygen.Filler")
+    {
+        plot(alldata[,var],alldata$Mnf.Flow,xlab=var,ylab="Mnf.Flow",ylim=c(min(alldata$Mnf.Flow[alldata$Mnf.Flow > 0.2],na.rm=TRUE),max(alldata$Mnf.Flow,na.rm=TRUE)))
+    }
+    if(var == "MFR")
+    {
+        plot(alldata[,var],alldata$Mnf.Flow,xlab=var,ylab="Mnf.Flow",ylim=c(min(alldata$Mnf.Flow[alldata$Mnf.Flow > 0.2],na.rm=TRUE),max(alldata$Mnf.Flow,na.rm=TRUE)),
+        xlim=c(600,850))
+    }
+    if(var == "Oxygen.Filler")
+    {
+        plot(alldata[,var],alldata$Mnf.Flow,xlab=var,ylab="Mnf.Flow",ylim=c(min(alldata$Mnf.Flow[alldata$Mnf.Flow > 0.2],na.rm=TRUE),max(alldata$Mnf.Flow,na.rm=TRUE)),
+        xlim=c(0,0.1))
+    }
+}
+```
+
+Looks like we see some of the same variables that were correlated with Mnf.Flow as a factor, along with a few new ones.
+
+## Variables vs. target
+
+Separate out training data.
+
+```{r}
+training <- alldata[alldata$Data == "Training",]
+```
+
+Start with a simple boxplot for brand code.
+
+```{r}
+boxplot(training_target ~ training$Brand.Code,ylab="pH")
+```
+
+Looks like brand C may have a somewhat lower pH.
+
+Plot scatterplots for remaining variables.
+
+```{r,fig.width=12,fig.height=24}
+par(mfrow=c(8,4))
+
+for(var in setdiff(colnames(training),c("Data","Brand.Code")))
+{
+    plot(training[,var],training_target,xlab=var,ylab="pH",main=paste0(var," cor=",round(cor(training[,var],training_target,use="pairwise.complete.obs"),digits=2)))
+}
+```
+
+Looks like there are a fair number of variables that will probably not end up in the final model, as they are not really associated with the target (pH) at all.
+
+There also seem like there may be some non-linear associations. For example, Usage.cont generally has constant pH throughout its range, except some observations with Usage.cont > 23 or so have much lower pH than the other points.
